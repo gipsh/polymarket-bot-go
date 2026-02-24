@@ -1,20 +1,27 @@
-.PHONY: build run test lint clean
+GO      ?= go
+BINARY  := polymarket-bot
+CMD     := ./cmd/bot
+
+.PHONY: build run dry-run test tidy clean
 
 build:
-	go build -o bin/bot ./cmd/bot
+	$(GO) build -o $(BINARY) $(CMD)
 
-run:
-	go run ./cmd/bot
+run: build
+	./$(BINARY)
+
+dry-run: build
+	./$(BINARY) --dry-run
 
 test:
-	go test ./...
+	$(GO) test ./...
 
-lint:
-	golangci-lint run ./...
+tidy:
+	$(GO) mod tidy
 
 clean:
-	rm -rf bin/
+	rm -f $(BINARY)
 
-# Build a static binary for Linux (for server deploy)
+# Cross-compile for Linux amd64
 build-linux:
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/bot-linux ./cmd/bot
+	GOOS=linux GOARCH=amd64 $(GO) build -o $(BINARY)-linux $(CMD)

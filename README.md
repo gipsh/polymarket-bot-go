@@ -1,105 +1,106 @@
 # polymarket-bot-go
 
-Go port of the [polymarket-bot](https://github.com/gipsh/polymarket-bot) Python ARB/Momentum trading bot.
+Go rewrite of the [Polymarket ARB/Momentum trading bot](https://github.com/gipsh/polymarket-bot).
 
-## Status: 🚧 In progress — skeleton only
+## Why Go?
 
-The Python bot is currently running in production. This port will be developed in parallel and cut over once validated.
-
-## Why Go
-
-| | Python | Go |
-|--|--|--|
-| Concurrency | asyncio (complex) | goroutines (simple) |
-| Deploy | Python + venv | single static binary |
-| Memory | ~100MB | ~15MB |
-| Latency | slower | ~10× faster |
-| Type safety | runtime | compile-time |
+- **Goroutines** replace Python threads + asyncio — cleaner concurrency
+- **Single binary** — no venv, no Python version issues, ships as one file
+- **Type safety** — compile-time checks catch bugs the Python version found at runtime
+- **Lower latency** — native code, no GIL, faster WebSocket and HTTP
 
 ## Architecture
 
 ```
-cmd/bot/main.go          ← main loop, signal handling, market cycle
+cmd/bot/main.go         ← main loop (market discovery → price → FSM → execute)
 internal/
-  config/                ← env vars → Config struct
-  market/                ← Gamma API → []Market (active markets)
-  pricer/                ← REST price fetcher (midpoints)
-  clob/                  ← CLOB client (auth, orders, trades)
-                           based on go-polymarket-tools/convergence-bot
+  config/               ← loads .env (same vars as Python version)
+  types/                ← shared domain types (Market, Prices, Action, BotState)
+  clob/
+    client.go           ← CLOB HTTP client (L1/L2 auth, order placement)
+    eip712.go           ← EIP-712 order signing + personal_sign (no SDK needed)
+  market/               ← MarketFinder: discovers hourly Up/Down markets via Gamma API
+  pricer/               ← parallel REST pricer (UP + DOWN fetched concurrently)
   ws/
-    pricer.go            ← WebSocket price feed (goroutine + channel)
-    user.go              ← WebSocket authenticated fill feed
-  fsm/                   ← Finite State Machine (ARB + Momentum logic)
-  inventory/             ← JSON-persisted token balances + API reconcile
-  executor/              ← Order placement + MERGE coordination
-  onchain/               ← Gnosis Safe execTransaction → mergePositions
+    pricer.go           ← WebSocket price feed (wss://ws-subscriptions-clob.polymarket.com)
+    user.go             ← authenticated fill event feed
+  fsm/                  ← Finite State Machine: GREY → ARB / MOMENTUM → MERGE
+  inventory/            ← per-condition token tracking, persisted to JSON
+  executor/             ← places market orders, triggers MERGE
+  merger/               ← on-chain mergePositions via Gnosis Safe execTransaction
 ```
 
-## Key Dependencies
+## Wallet Architecture
 
 ```
-github.com/polymarket/go-order-utils  ← EIP-712 order signing (official SDK)
-github.com/ethereum/go-ethereum       ← on-chain operations (Gnosis Safe, CT)
-github.com/gorilla/websocket          ← WebSocket feeds
-github.com/joho/godotenv              ← .env loading
+MetaMask EOA (PRIVATE_KEY / MERGE_PRIVATE_KEY)
+    └── controls ──→ Gnosis Safe 1.3.0 (FUNDER_ADDRESS)
+                          └── holds USDC
+                          └── signs CLOB orders (SIGNATURE_TYPE=2)
+                          └── executes mergePositions on-chain
 ```
 
-> **Note:** The CLOB client + executor WS are adapted from
-> [gipsh/go-polymarket-tools](https://github.com/gipsh/go-polymarket-tools/tree/main/convergence-bot/polymarket)
-> which already implements EIP-712 signing, HMAC headers, API key derivation,
-> order posting and the authenticated fill WebSocket.
+## Setup
 
-## Implementation Plan
-
-### Phase 1 — Foundation (config, market, pricer)
-- [ ] `config/config.go` — load `.env` into typed Config struct
-- [ ] `market/finder.go` — call Gamma API, return `[]Market` closing within 4h
-- [ ] `pricer/rest.go` — REST midpoint fetcher (fallback when WS is stale)
-
-### Phase 2 — CLOB client (port from go-polymarket-tools)
-- [ ] `clob/client.go` — copy + adapt from convergence-bot (already done)
-- [ ] Add FOK market order support (convergence-bot only has GTC limit)
-- [ ] Add `GetTrades()` endpoint (for inventory reconcile)
-- [ ] Add `GetBalanceAllowance()` endpoint
-
-### Phase 3 — Core logic
-- [ ] `fsm/fsm.go` — ARB + Momentum FSM (1:1 port from Python)
-- [ ] `inventory/inventory.go` — JSON persist + `ReconcileFromAPI()`
-- [ ] `executor/executor.go` — `BuyMarket()`, `MergePairs()`, fill handling
-
-### Phase 4 — WebSocket feeds
-- [ ] `ws/pricer.go` — market price goroutine + in-memory cache
-- [ ] `ws/user.go` — authenticated fill feed (port from convergence-bot executor)
-
-### Phase 5 — On-chain / Merger
-- [ ] `onchain/safe.go` — Gnosis Safe 1.3.0 `execTransaction` signing
-- [ ] `onchain/merger.go` — `mergePositions` via Safe
-- [ ] `onchain/setup.go` — `USDC.approve` × 3 contracts (setup tool)
-
-### Phase 6 — Main loop
-- [ ] `cmd/bot/main.go` — market cycle, goroutines, signal handling
-- [ ] `Makefile` — build, run, test targets
-
-## Configuration (`.env`)
-
-Same as Python bot:
-
-```env
-PRIVATE_KEY=0x...           # MetaMask EOA private key
-FUNDER_ADDRESS=0x...        # Gnosis Safe address (holds USDC)
-SIGNATURE_TYPE=2            # 2=POLY_GNOSIS_SAFE
-POLYGON_RPC=https://polygon-bor-rpc.publicnode.com
-DRY_RUN=false
-ARB_ORDER_USDC=5.0
-MOMENTUM_MAIN_USDC=10.0
-MOMENTUM_HEDGE_USDC=1.0
-MOMENTUM_MAX_ENTRY=0.92
-ARB_THRESHOLD=0.97
-MOMENTUM_TRIGGER=0.85
+```bash
+cp .env.example .env
+# Fill in PRIVATE_KEY, FUNDER_ADDRESS, MERGE_PRIVATE_KEY
 ```
 
-## Validation Strategy
+## Build & Run
 
-1. Run Go bot with `DRY_RUN=true` alongside the Python bot
-2. Compare FSM decisions for the same market data
-3. Cut over when behavior matches for 48h
+```bash
+# Install Go 1.23+
+go build -o polymarket-bot ./cmd/bot
+
+# Run live
+./polymarket-bot
+
+# Simulate (no real orders)
+./polymarket-bot --dry-run
+
+# Background with log
+bash start.sh
+bash stop.sh
+```
+
+## Strategy
+
+| Mode      | Trigger                      | Action                                         |
+|-----------|------------------------------|------------------------------------------------|
+| ARB       | UP + DOWN < 0.97             | Buy cheaper side → MERGE when ≥ 1 pair         |
+| MOMENTUM  | Winner > 0.85 and ≤ 0.92    | Buy winner (main) + loser (hedge $1 insurance) |
+| MERGE     | Market closing or resolved   | Call `mergePositions` on Polygon via Safe       |
+
+## Migration Status
+
+### Phase 1 (complete ✅)
+- [x] Module scaffold, all packages defined
+- [x] `internal/config` — reads `.env` (100% parity with Python config.py)
+- [x] `internal/types` — all shared types
+- [x] `internal/clob` — CLOB HTTP client + **EIP-712 signing** (manual, no SDK)
+- [x] `internal/market` — MarketFinder (Gamma API)
+- [x] `internal/pricer` — parallel REST pricer
+- [x] `internal/ws/pricer` — WebSocket market feed
+- [x] `internal/ws/user` — authenticated fill feed
+- [x] `internal/fsm` — full FSM (ARB / MOMENTUM / MERGE logic)
+- [x] `internal/inventory` — JSON-persisted token inventory + API reconcile
+- [x] `internal/executor` — order placement + dry-run mode
+- [x] `internal/merger` — on-chain MERGE via Gnosis Safe `execTransaction`
+- [x] `cmd/bot/main.go` — full main loop
+
+### Next Steps
+- [ ] Integration test against testnet / mainnet with DRY_RUN=true
+- [ ] Verify EIP-712 signatures match Python py_clob_client output
+- [ ] Replace Python bot with Go binary
+- [ ] Add Prometheus metrics endpoint
+
+## Key Contracts (Polygon)
+
+| Contract              | Address                                      |
+|-----------------------|----------------------------------------------|
+| ConditionalTokens     | `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` |
+| USDC.e                | `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` |
+| CTF Exchange          | `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E` |
+| Neg Risk CTF Exchange | `0xC5d563A36AE78145C45a50134d48A1215220f80a` |
+| Neg Risk Adapter      | `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296` |

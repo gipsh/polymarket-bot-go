@@ -1,119 +1,135 @@
+// Package config loads bot configuration from environment / .env file.
+// Mirror of Python config.py.
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
 
-type Config struct {
-	// Wallet
-	PrivateKey    string
-	FunderAddress string
-	SignatureType int
+// ── Polymarket API endpoints ─────────────────────────────────────────────
+const (
+	CLOBHost  = "https://clob.polymarket.com"
+	GammaHost = "https://gamma-api.polymarket.com"
+	ChainID   = 137 // Polygon mainnet
+)
 
-	// CLOB
-	CLOBHost string
-	ChainID  int
+// ── Config fields (populated by Load) ───────────────────────────────────
+var (
+	// Credentials
+	PrivateKey      string
+	FunderAddress   string
+	SignatureType   int    // 0=EOA, 1=Proxy, 2=GnosisSafe
+	DryRun          bool
+	LogLevel        string
+	PolygonRPC      string
+	MergePrivateKey string
 
-	// Polygon RPC
-	PolygonRPC string
+	// Assets to trade (e.g. ["bitcoin"])
+	Assets []string
 
-	// Trading
-	DryRun            bool
-	ArbOrderUSDC      float64
-	ArbThreshold      float64
-	MomentumMainUSDC  float64
-	MomentumHedgeUSDC float64
-	MomentumMaxUSDC   float64
+	// FSM thresholds
+	ARBThreshold      float64
+	GreyZoneLow       float64
 	MomentumTrigger   float64
 	MomentumMaxEntry  float64
 
-	// Bot
-	Assets        []string // e.g. ["bitcoin"]
-	PollIntervalS float64
-	LookAheadMins int
+	// Order sizing (USDC)
+	ARBOrderUSDC      float64
+	ARBMaxUSDC        float64
+	MomentumMainUSDC  float64
+	MomentumHedgeUSDC float64
+	MomentumMaxUSDC   float64
 
-	// Files
+	// Timing
+	PollIntervalSec  float64
+	MarketRefreshMin int
+	MaxMarketAgeH    int
+
+	// Inventory
 	InventoryFile string
-}
+)
 
-// Load reads .env and returns a Config. Panics on missing required fields.
-func Load() *Config {
-	_ = godotenv.Load()
-
-	cfg := &Config{
-		PrivateKey:        mustEnv("PRIVATE_KEY"),
-		FunderAddress:     mustEnv("FUNDER_ADDRESS"),
-		SignatureType:     envInt("SIGNATURE_TYPE", 2),
-		CLOBHost:          envStr("CLOB_HOST", "https://clob.polymarket.com"),
-		ChainID:           envInt("CHAIN_ID", 137),
-		PolygonRPC:        envStr("POLYGON_RPC", "https://polygon-bor-rpc.publicnode.com"),
-		DryRun:            envBool("DRY_RUN", false),
-		ArbOrderUSDC:      envFloat("ARB_ORDER_USDC", 5.0),
-		ArbThreshold:      envFloat("ARB_THRESHOLD", 0.97),
-		MomentumMainUSDC:  envFloat("MOMENTUM_MAIN_USDC", 10.0),
-		MomentumHedgeUSDC: envFloat("MOMENTUM_HEDGE_USDC", 1.0),
-		MomentumMaxUSDC:   envFloat("MOMENTUM_MAX_USDC", 30.0),
-		MomentumTrigger:   envFloat("MOMENTUM_TRIGGER", 0.85),
-		MomentumMaxEntry:  envFloat("MOMENTUM_MAX_ENTRY", 0.92),
-		PollIntervalS:     envFloat("POLL_INTERVAL", 2.0),
-		LookAheadMins:     envInt("LOOK_AHEAD_MINS", 240),
-		InventoryFile:     envStr("INVENTORY_FILE", "inventory_state.json"),
-		Assets:            []string{"bitcoin"}, // TODO: parse ASSETS env
+// Load reads .env (if present) then overrides from OS env vars.
+func Load() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("[config] No .env file found, using OS environment")
 	}
 
-	return cfg
-}
+	// Credentials
+	PrivateKey      = getEnv("PRIVATE_KEY", "")
+	FunderAddress   = getEnv("FUNDER_ADDRESS", "")
+	SignatureType   = getEnvInt("SIGNATURE_TYPE", 0)
+	DryRun          = getEnvBool("DRY_RUN", false)
+	LogLevel        = getEnv("LOG_LEVEL", "INFO")
+	PolygonRPC      = getEnv("POLYGON_RPC", "https://polygon-bor-rpc.publicnode.com")
+	MergePrivateKey = getEnv("MERGE_PRIVATE_KEY", PrivateKey)
 
-func mustEnv(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		panic("missing required env var: " + key)
+	// Assets
+	assetsEnv := getEnv("ASSETS", "bitcoin")
+	Assets = []string{}
+	for _, a := range strings.Split(assetsEnv, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			Assets = append(Assets, a)
+		}
 	}
-	return v
+
+	// FSM thresholds
+	ARBThreshold     = getEnvFloat("ARB_THRESHOLD", 0.97)
+	GreyZoneLow      = getEnvFloat("GREY_ZONE_LOW", 0.75)
+	MomentumTrigger  = getEnvFloat("MOMENTUM_TRIGGER", 0.85)
+	MomentumMaxEntry = getEnvFloat("MOMENTUM_MAX_ENTRY", 0.92)
+
+	// Order sizing
+	ARBOrderUSDC      = getEnvFloat("ARB_ORDER_USDC", 5.0)
+	ARBMaxUSDC        = getEnvFloat("ARB_MAX_USDC", 20.0)
+	MomentumMainUSDC  = getEnvFloat("MOMENTUM_MAIN_USDC", 10.0)
+	MomentumHedgeUSDC = getEnvFloat("MOMENTUM_HEDGE_USDC", 1.0)
+	MomentumMaxUSDC   = getEnvFloat("MOMENTUM_MAX_USDC", 30.0)
+
+	// Timing
+	PollIntervalSec  = getEnvFloat("POLL_INTERVAL", 2.0)
+	MarketRefreshMin = getEnvInt("MARKET_REFRESH_MIN", 10)
+	MaxMarketAgeH    = getEnvInt("MAX_MARKET_AGE_H", 4)
+
+	// Inventory
+	InventoryFile = getEnv("INVENTORY_FILE", "inventory_state.json")
 }
 
-func envStr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+func getEnv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
 	}
-	return def
+	return fallback
 }
 
-func envBool(key string, def bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
+func getEnvInt(key string, fallback int) int {
+	if v, ok := os.LookupEnv(key); ok {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
 	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return def
-	}
-	return b
+	return fallback
 }
 
-func envInt(key string, def int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
+func getEnvFloat(key string, fallback float64) float64 {
+	if v, ok := os.LookupEnv(key); ok {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
 	}
-	i, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return i
+	return fallback
 }
 
-func envFloat(key string, def float64) float64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
+func getEnvBool(key string, fallback bool) bool {
+	if v, ok := os.LookupEnv(key); ok {
+		return strings.ToLower(v) == "true"
 	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return def
-	}
-	return f
+	return fallback
 }

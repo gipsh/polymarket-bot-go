@@ -1,4 +1,7 @@
 .env
-bin/
-inventory_state.json
+polymarket-bot
+polymarket-bot-linux
+bot.pid
+bot.log
 *.log
+inventory_state.json

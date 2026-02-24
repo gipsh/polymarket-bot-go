@@ -1,0 +1,4 @@
+.env
+bin/
+inventory_state.json
+*.log

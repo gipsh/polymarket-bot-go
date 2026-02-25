@@ -139,23 +139,12 @@ func (f *FSM) Step(
 			}
 		}
 
-		// Pick cheaper side; override with inventory rebalancing if skewed >20
-		var sideToBuy, reason string
-		imbalanceSide, imbalanceAmt := inv.GetImbalance(conditionID)
-		if imbalanceAmt > 20 {
-			sideToBuy = imbalanceSide
-			reason = fmt.Sprintf("ARB rebalance: need %s (%.1f excess on other side)", sideToBuy, imbalanceAmt)
-		} else if prices.Up <= prices.Down {
-			sideToBuy = "UP"
-			reason = fmt.Sprintf("ARB: buy UP (cheaper at %.3f) | spread=%.3f", prices.Up, prices.Spread)
-		} else {
-			sideToBuy = "DOWN"
-			reason = fmt.Sprintf("ARB: buy DOWN (cheaper at %.3f) | spread=%.3f", prices.Down, prices.Spread)
-		}
-
+		// Both-sides ARB: buy UP + DOWN simultaneously
+		reason := fmt.Sprintf("ARB both-sides: up=%.3f down=%.3f | spread=%.3f",
+			prices.Up, prices.Down, prices.Spread)
 		f.lastArbTS[conditionID] = time.Now()
-		f.arbSpent[conditionID] = arbSp + config.ARBOrderUSDC
-		return types.BotARB, types.BuyArbAction(sideToBuy, config.ARBOrderUSDC, reason)
+		f.arbSpent[conditionID] = arbSp + config.ARBOrderUSDC*2
+		return types.BotARB, types.BuyArbBothAction(config.ARBOrderUSDC, config.ARBOrderUSDC, reason)
 	}
 
 	// ── Fallback ───────────────────────────────────────────────────────

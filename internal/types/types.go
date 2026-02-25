@@ -154,6 +154,7 @@ const (
 	ActionBuyArb       ActionKind = "buy_arb"
 	ActionBuyMomentum  ActionKind = "buy_momentum"
 	ActionMerge        ActionKind = "merge"
+	ActionBuyArbBoth   ActionKind = "buy_arb_both"
 )
 
 // Action is the decision the FSM returns for a given market.
@@ -200,6 +201,19 @@ func MergeAction(reason string) Action {
 	return Action{Kind: ActionMerge, Reason: reason}
 }
 
+// BuyArbBothAction creates an action to buy both UP and DOWN sides in ARB mode.
+func BuyArbBothAction(upUSDC, downUSDC float64, reason string) Action {
+	return Action{
+		Kind:      ActionBuyArbBoth,
+		MainSide:  "UP",
+		HedgeSide: "DOWN",
+		MainUSDC:  upUSDC,
+		HedgeUSDC: downUSDC,
+		ArbUSDC:   upUSDC + downUSDC,
+		Reason:    reason,
+	}
+}
+
 // ── Order types ───────────────────────────────────────────────────────────
 
 // OrderSide is the side of an order (BUY).
@@ -244,6 +258,7 @@ type OrderResult struct {
 	USDCSpent      float64
 	TokensReceived float64
 	OrderID        string
+	LimitOrderID   string // set when a GTC limit order is placed (for cancellation)
 	Error          string
 }
 

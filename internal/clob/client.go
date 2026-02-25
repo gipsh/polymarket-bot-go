@@ -266,6 +266,170 @@ func (c *Client) PlaceMarketOrder(req MarketOrderRequest) (map[string]interface{
 	return c.postL2("/order", body)
 }
 
+// LimitOrderRequest defines the parameters for a GTC limit order.
+type LimitOrderRequest struct {
+	ConditionID string
+	UpTokenID   string
+	DownTokenID string
+	Side        string  // "UP" or "DOWN"
+	Price       float64 // limit price
+	Size        float64 // token size
+}
+
+// PlaceLimitOrder places a GTC (Good-Till-Cancelled) limit order.
+// Price is the limit price (e.g. 0.47); Size is the token amount (usdc / price).
+// Returns the full response from the CLOB or an error.
+func (c *Client) PlaceLimitOrder(req LimitOrderRequest) (map[string]interface{}, error) {
+	if c.key == nil {
+		return nil, fmt.Errorf("no private key — cannot place orders")
+	}
+	if c.creds == nil {
+		return nil, fmt.Errorf("API creds not set — call CreateOrDeriveAPICreds first")
+	}
+
+	tokenID := req.UpTokenID
+	if req.Side == "DOWN" {
+		tokenID = req.DownTokenID
+	}
+
+	salt := big.NewInt(rand.Int63())
+	makerAmt := USDCToUnits(req.Price * req.Size) // USDC we're paying
+	takerAmt := TokensToUnits(req.Size)            // tokens we want
+
+	tokenIDBig, err := TokenIDFromHex(tokenID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tokenID: %w", err)
+	}
+
+	maker := c.address
+	if c.sigType == types.SigGnosisSafe {
+		maker = c.funder // Safe is the maker; EOA is the signer
+	}
+
+	params := OrderParams{
+		Salt:          salt,
+		Maker:         maker,
+		Signer:        c.address,
+		Taker:         common.Address{}, // zero = open order
+		TokenID:       tokenIDBig,
+		MakerAmount:   makerAmt,
+		TakerAmount:   takerAmt,
+		Expiration:    big.NewInt(0), // GTC = never expires
+		Nonce:         big.NewInt(0),
+		FeeRateBps:    big.NewInt(0),
+		Side:          0, // BUY
+		SignatureType: uint8(c.sigType),
+	}
+
+	sig, err := BuildAndSignOrder(params, c.key, false)
+	if err != nil {
+		return nil, fmt.Errorf("sign limit order: %w", err)
+	}
+
+	order := map[string]interface{}{
+		"salt":          salt.String(),
+		"maker":         strings.ToLower(maker.Hex()),
+		"signer":        strings.ToLower(c.address.Hex()),
+		"taker":         "0x0000000000000000000000000000000000000000",
+		"tokenId":       tokenIDBig.String(),
+		"makerAmount":   makerAmt.String(),
+		"takerAmount":   takerAmt.String(),
+		"expiration":    "0",
+		"nonce":         "0",
+		"feeRateBps":    "0",
+		"side":          0,
+		"signatureType": int(c.sigType),
+		"signature":     sig,
+	}
+
+	body := map[string]interface{}{
+		"order":     order,
+		"owner":     strings.ToLower(maker.Hex()),
+		"orderType": "GTC",
+	}
+
+	return c.postL2("/order", body)
+}
+
+// CancelOrder cancels an open GTC order by orderID.
+func (c *Client) CancelOrder(orderID string) error {
+	if c.creds == nil {
+		return fmt.Errorf("API creds not set")
+	}
+	endpoint := fmt.Sprintf("%s/order/%s", c.host, orderID)
+	req, err := http.NewRequest("DELETE", endpoint, nil)
+	if err != nil {
+		return err
+	}
+	c.addL2Headers(req, "DELETE", "/order/"+orderID, "")
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("cancel order %s: HTTP %d: %s", orderID[:12], resp.StatusCode, body)
+	}
+	return nil
+}
+
+// GetOrderStatus returns the current status of an order ("live", "matched", "cancelled", etc.)
+// and the size filled so far.
+func (c *Client) GetOrderStatus(orderID string) (string, float64, error) {
+	if c.creds == nil {
+		return "", 0, fmt.Errorf("API creds not set")
+	}
+	endpoint := fmt.Sprintf("%s/order/%s", c.host, orderID)
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	c.addL2Headers(req, "GET", "/order/"+orderID, "")
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", 0, fmt.Errorf("get order %s: HTTP %d: %s", orderID[:12], resp.StatusCode, body)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", 0, err
+	}
+	status := clobGetString(result, "status")
+	sizeFilled := clobGetFloat(result, "sizeFilled")
+	return status, sizeFilled, nil
+}
+
+// ── local helpers for clob package ────────────────────────────────────────
+
+func clobGetString(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+		return fmt.Sprintf("%v", v)
+	}
+	return ""
+}
+
+func clobGetFloat(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key]; ok {
+		switch n := v.(type) {
+		case float64:
+			return n
+		case string:
+			var f float64
+			fmt.Sscanf(n, "%f", &f)
+			return f
+		}
+	}
+	return 0
+}
+
 // ── Trade history ─────────────────────────────────────────────────────────
 
 // Trade represents a single trade entry from /data/trades.

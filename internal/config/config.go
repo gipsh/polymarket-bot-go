@@ -52,6 +52,11 @@ var (
 
 	// Inventory
 	InventoryFile string
+
+	// ARB limit order settings
+	ARBUseLimitOrders   bool
+	ARBLimitTimeoutSecs int
+	ARBSlippageMaxPct   float64
 )
 
 // Load reads .env (if present) then overrides from OS env vars.
@@ -98,6 +103,11 @@ func Load() {
 
 	// Inventory
 	InventoryFile = getEnv("INVENTORY_FILE", "inventory_state.json")
+
+	// ARB limit order settings
+	ARBUseLimitOrders   = getEnvBool("ARB_USE_LIMIT_ORDERS", true)
+	ARBLimitTimeoutSecs = getEnvInt("ARB_LIMIT_TIMEOUT_SECS", 30)
+	ARBSlippageMaxPct   = getEnvFloat("ARB_SLIPPAGE_MAX_PCT", 3.0)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

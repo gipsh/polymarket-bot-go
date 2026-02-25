@@ -5,6 +5,8 @@ package executor
 import (
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/gipsh/polymarket-bot-go/internal/clob"
 	"github.com/gipsh/polymarket-bot-go/internal/config"
@@ -140,6 +142,161 @@ func (e *Executor) MergePairs(conditionID string) float64 {
 		e.inv.RecordMerge(conditionID, merged)
 	}
 	return merged
+}
+
+// BuyLimit places a GTC limit order and polls until filled, cancelled, or timeout.
+// Returns OrderResult with actual fill price for slippage check.
+func (e *Executor) BuyLimit(
+	conditionID, upTokenID, downTokenID, side string,
+	usdcAmount, limitPrice float64,
+) types.OrderResult {
+	tokenID := upTokenID
+	if side == "DOWN" {
+		tokenID = downTokenID
+	}
+	tokenSize := usdcAmount / limitPrice
+
+	if e.dryRun {
+		log.Printf("[executor] [DRY_RUN] LIMIT BUY %s | $%.2f @ %.4f | size=%.3f tokens | token: %s...",
+			side, usdcAmount, limitPrice, tokenSize, tokenID[:12])
+		e.inv.RecordBuy(conditionID, upTokenID, downTokenID, side, tokenSize, usdcAmount)
+		return types.OrderResult{
+			Success:        true,
+			TokenID:        tokenID,
+			Side:           side,
+			USDCSpent:      usdcAmount,
+			TokensReceived: tokenSize,
+			OrderID:        "dry-run-limit",
+		}
+	}
+
+	resp, err := e.client.PlaceLimitOrder(clob.LimitOrderRequest{
+		ConditionID: conditionID,
+		UpTokenID:   upTokenID,
+		DownTokenID: downTokenID,
+		Side:        side,
+		Price:       limitPrice,
+		Size:        tokenSize,
+	})
+	if err != nil {
+		log.Printf("[executor] LIMIT order failed (%s $%.2f @ %.3f): %v", side, usdcAmount, limitPrice, err)
+		return types.OrderResult{Success: false, TokenID: tokenID, Side: side, Error: err.Error()}
+	}
+
+	orderID := getString(resp, "orderID")
+	status := getString(resp, "status")
+	log.Printf("[executor] LIMIT BUY %s placed | $%.2f @ %.4f | order: %s | status: %s",
+		side, usdcAmount, limitPrice, orderID, status)
+
+	// If already matched immediately
+	if status == "matched" {
+		tokensReceived := getFloat(resp, "takingAmount")
+		if tokensReceived == 0 {
+			tokensReceived = tokenSize
+		}
+		e.inv.RecordBuy(conditionID, upTokenID, downTokenID, side, tokensReceived, usdcAmount)
+		e.checkSlippage(side, limitPrice, usdcAmount/tokensReceived)
+		return types.OrderResult{
+			Success:        true,
+			TokenID:        tokenID,
+			Side:           side,
+			USDCSpent:      usdcAmount,
+			TokensReceived: tokensReceived,
+			OrderID:        orderID,
+		}
+	}
+
+	// Poll until filled or timeout
+	deadline := time.Now().Add(time.Duration(config.ARBLimitTimeoutSecs) * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		st, sizeFilled, err := e.client.GetOrderStatus(orderID)
+		if err != nil {
+			log.Printf("[executor] poll order %s: %v", orderID[:12], err)
+			continue
+		}
+		if st == "matched" || (st == "live" && sizeFilled > 0) {
+			tokensReceived := sizeFilled
+			if tokensReceived == 0 {
+				tokensReceived = tokenSize
+			}
+			actualPrice := usdcAmount / tokensReceived
+			e.inv.RecordBuy(conditionID, upTokenID, downTokenID, side, tokensReceived, usdcAmount)
+			e.checkSlippage(side, limitPrice, actualPrice)
+			log.Printf("[executor] ✅ LIMIT BUY %s filled | %.3f tokens @ %.4f", side, tokensReceived, actualPrice)
+			return types.OrderResult{
+				Success:        true,
+				TokenID:        tokenID,
+				Side:           side,
+				USDCSpent:      usdcAmount,
+				TokensReceived: tokensReceived,
+				OrderID:        orderID,
+			}
+		}
+		if st == "cancelled" {
+			break
+		}
+		log.Printf("[executor] LIMIT BUY %s waiting... (status=%s, filled=%.3f)", side, st, sizeFilled)
+	}
+
+	// Timeout — cancel order
+	log.Printf("[executor] LIMIT BUY %s timeout (%ds) — cancelling %s...",
+		side, config.ARBLimitTimeoutSecs, orderID[:12])
+	if err := e.client.CancelOrder(orderID); err != nil {
+		log.Printf("[executor] cancel failed: %v", err)
+	} else {
+		log.Printf("[executor] LIMIT BUY %s cancelled | order: %s", side, orderID[:12])
+	}
+	return types.OrderResult{
+		Success: false,
+		TokenID: tokenID,
+		Side:    side,
+		Error:   fmt.Sprintf("Limit order not filled within %ds — cancelled", config.ARBLimitTimeoutSecs),
+		OrderID: orderID,
+	}
+}
+
+// checkSlippage logs a warning if actual fill price exceeds the limit price by more than threshold.
+func (e *Executor) checkSlippage(side string, expectedPrice, actualPrice float64) {
+	if expectedPrice <= 0 {
+		return
+	}
+	slippagePct := (actualPrice - expectedPrice) / expectedPrice * 100
+	if slippagePct > config.ARBSlippageMaxPct {
+		log.Printf("[executor] ⚠️  HIGH SLIPPAGE %s: expected=%.4f actual=%.4f slippage=%.1f%% (threshold=%.0f%%) — book may be thin",
+			side, expectedPrice, actualPrice, slippagePct, config.ARBSlippageMaxPct)
+	}
+}
+
+// BuyArbBoth concurrently buys both UP and DOWN sides using GTC limit orders.
+// This is the ARB both-sides strategy.
+func (e *Executor) BuyArbBoth(
+	conditionID, upTokenID, downTokenID string,
+	upUSDC, downUSDC, upPrice, downPrice float64,
+) (upResult, downResult types.OrderResult) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		if config.ARBUseLimitOrders {
+			upResult = e.BuyLimit(conditionID, upTokenID, downTokenID, "UP", upUSDC, upPrice)
+		} else {
+			upResult = e.BuyMarket(conditionID, upTokenID, downTokenID, "UP", upUSDC, upPrice)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if config.ARBUseLimitOrders {
+			downResult = e.BuyLimit(conditionID, upTokenID, downTokenID, "DOWN", downUSDC, downPrice)
+		} else {
+			downResult = e.BuyMarket(conditionID, upTokenID, downTokenID, "DOWN", downUSDC, downPrice)
+		}
+	}()
+
+	wg.Wait()
+	return
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

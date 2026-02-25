@@ -213,3 +213,10 @@ func USDCToUnits(usdc float64) *big.Int {
 	units := int64(usdc * 1e6)
 	return big.NewInt(units)
 }
+
+// TokensToUnits converts a float64 token amount to on-chain units (6 decimals for conditional tokens).
+func TokensToUnits(amount float64) *big.Int {
+	// Conditional tokens use 6 decimals on Polymarket CLOB
+	scaled := int64(amount * 1e6)
+	return big.NewInt(scaled)
+}

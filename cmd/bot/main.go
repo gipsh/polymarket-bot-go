@@ -240,6 +240,25 @@ func executeAction(m *types.Market, action types.Action, prices *types.Prices, e
 				action.HedgeSide, hedgeResult.USDCSpent, hedgeResult.TokensReceived)
 		}
 
+	case types.ActionBuyArbBoth:
+		upResult, downResult := exec.BuyArbBoth(
+			m.ConditionID, m.UpTokenID, m.DownTokenID,
+			action.MainUSDC, action.HedgeUSDC,
+			prices.Up, prices.Down,
+		)
+		if upResult.Success {
+			log.Printf("  ✓ ARB BUY UP | $%.2f → %.3f tokens @ %.4f",
+				upResult.USDCSpent, upResult.TokensReceived, prices.Up)
+		} else {
+			log.Printf("  ✗ ARB BUY UP failed: %s", upResult.Error)
+		}
+		if downResult.Success {
+			log.Printf("  ✓ ARB BUY DOWN | $%.2f → %.3f tokens @ %.4f",
+				downResult.USDCSpent, downResult.TokensReceived, prices.Down)
+		} else {
+			log.Printf("  ✗ ARB BUY DOWN failed: %s", downResult.Error)
+		}
+
 	case types.ActionMerge:
 		pairs := exec.MergePairs(m.ConditionID)
 		if pairs > 0 {
